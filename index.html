@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>GDB排查AI IT 交接文件</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#ffffff; --fg:#1d2433; --muted:#5b6475; --line:#d8dce3; --accent:#0b6bcb; --err:#c0362c; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0f141c; --card:#171e29; --fg:#e6e9ef; --muted:#9aa3b2; --line:#2a3342; --accent:#5aa7ff; --err:#ff7a6e; } }
+  * { box-sizing: border-box; }
+  body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center; background:var(--bg); color:var(--fg);
+         font-family: -apple-system, "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", sans-serif; padding:16px; }
+  .card { width:100%; max-width:380px; background:var(--card); border:1px solid var(--line); border-radius:12px; padding:28px 24px; }
+  h1 { font-size:20px; margin:0 0 6px; }
+  p { margin:0 0 18px; color:var(--muted); font-size:14px; line-height:1.6; }
+  input { width:100%; font-size:16px; padding:10px 12px; border:1px solid var(--line); border-radius:8px; background:transparent; color:var(--fg); }
+  button { margin-top:12px; width:100%; font-size:16px; padding:10px; border:0; border-radius:8px; background:var(--accent); color:#fff; cursor:pointer; }
+  button:disabled { opacity:.6; cursor:wait; }
+  #msg { margin:12px 0 0; min-height:20px; font-size:14px; }
+  #msg.err { color:var(--err); }
+</style>
+</head>
+<body>
+<form class="card" id="f">
+  <h1>GDB排查AI IT 交接文件</h1>
+  <p>請輸入密碼。同一台電腦、同一個瀏覽器輸入一次即可，之後直接開啟。</p>
+  <input type="password" id="pw" autocomplete="current-password" aria-label="密碼" required>
+  <button id="go" type="submit">進入</button>
+  <p id="msg" role="status"></p>
+</form>
+<script>
+const START = '02_交接說明會簡報.html';
+const next = new URLSearchParams(location.search).get('next') || START;
+const msg = document.getElementById('msg');
+
+function idb() {
+  return new Promise((resolve, reject) => {
+    const open = indexedDB.open('handoff-vault', 1);
+    open.onupgradeneeded = () => open.result.createObjectStore('k');
+    open.onsuccess = () => resolve(open.result);
+    open.onerror = () => reject(open.error);
+  });
+}
+async function saveKey(key) {
+  const db = await idb();
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction('k', 'readwrite');
+    tx.objectStore('k').put(key, 'key');
+    tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);
+  });
+}
+async function loadKey() {
+  const db = await idb();
+  return new Promise((resolve) => {
+    const get = db.transaction('k', 'readonly').objectStore('k').get('key');
+    get.onsuccess = () => resolve(get.result || null);
+    get.onerror = () => resolve(null);
+  });
+}
+function b64(s) { return Uint8Array.from(atob(s), c => c.charCodeAt(0)); }
+async function tryKey(key) {
+  const buf = await (await fetch('vault/manifest.bin', { cache: 'no-cache' })).arrayBuffer();
+  await crypto.subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(buf.slice(0, 12)) }, key, buf.slice(12));
+}
+async function enter() {
+  const reg = await navigator.serviceWorker.register('sw.js');
+  await navigator.serviceWorker.ready;
+  (reg.active || navigator.serviceWorker.controller)?.postMessage('reset');
+  location.replace(next);
+}
+
+(async () => {
+  if (!('serviceWorker' in navigator) || !window.crypto?.subtle) {
+    msg.textContent = '這個瀏覽器不支援，請改用最新版 Chrome、Edge 或 Safari 開啟。';
+    msg.className = 'err'; document.getElementById('go').disabled = true; return;
+  }
+  try { const key = await loadKey(); if (key) { await tryKey(key); await enter(); } } catch (e) {}
+})();
+
+document.getElementById('f').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const go = document.getElementById('go');
+  go.disabled = true; msg.className = ''; msg.textContent = '驗證中…';
+  try {
+    const meta = await (await fetch('vault/meta.json', { cache: 'no-cache' })).json();
+    const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(document.getElementById('pw').value), 'PBKDF2', false, ['deriveKey']);
+    const key = await crypto.subtle.deriveKey({ name: 'PBKDF2', salt: b64(meta.salt), iterations: meta.iterations, hash: 'SHA-256' },
+      base, { name: 'AES-GCM', length: 256 }, false, ['decrypt']);
+    try { await tryKey(key); } catch (e) { msg.textContent = '密碼不正確'; msg.className = 'err'; go.disabled = false; return; }
+    await saveKey(key);
+    msg.textContent = '開啟中…';
+    await enter();
+  } catch (e) {
+    msg.textContent = '開啟失敗，請重新整理後再試一次。'; msg.className = 'err'; go.disabled = false;
+  }
+});
+</script>
+</body>
+</html>
